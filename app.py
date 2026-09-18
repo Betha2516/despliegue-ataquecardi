@@ -1,8 +1,11 @@
 # ============================================================
 #  Despliegue — Predicción de riesgo de ataque al corazón
 #  Modelo: Random Forest (seleccionado en la fase de modelado)
+#
+#  Repo mínimo: app.py + requirements.txt + modelo_rf_cardiaco.pkl
+#  (las métricas y distribuciones quedan incrustadas aquí abajo,
+#   así no hace falta ningún .json adicional en el repositorio)
 # ============================================================
-import json
 import pickle
 
 import numpy as np
@@ -50,30 +53,33 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ------------------------------------------------------------
-# Carga de artefactos (modelo, escalador, métricas, distribuciones)
+# Métricas y distribuciones — calculadas una sola vez durante el
+# entrenamiento e incrustadas aquí como constantes (no requieren
+# archivos .json ni el dataset original dentro del repo)
 # ------------------------------------------------------------
-@st.cache_resource
-def cargar_modelo():
-    with open("modelo_rf_cardiaco.pkl", "rb") as f:
-        modelo, labelencoder, variables, min_max_scaler = pickle.load(f)
-    return modelo, labelencoder, list(variables), min_max_scaler
+METRICAS = {
+    "reporte": {
+        "No":  {"precision": 0.9615, "recall": 0.8395, "f1-score": 0.8964, "support": 1458},
+        "Yes": {"precision": 0.5094, "recall": 0.8322, "f1-score": 0.6320, "support": 292},
+        "accuracy": 0.8383,
+    },
+    "n_estimators": 400,
+    "max_depth": 10,
+}
 
-
-@st.cache_data
-def cargar_metricas():
-    with open("metricas_modelo.json") as f:
-        return json.load(f)
-
-
-@st.cache_data
-def cargar_distribuciones():
-    with open("distribuciones.json") as f:
-        return json.load(f)
-
-
-modelo, labelencoder, variables, min_max_scaler = cargar_modelo()
-metricas = cargar_metricas()
-dist = cargar_distribuciones()
+DISTRIBUCIONES = {
+    "age": {
+        "counts": [320,152,173,211,216,221,222,262,250,290,301,282,344,342,296,263,210,197,185,373],
+        "edges":  [1.0,5.05,9.1,13.15,17.2,21.25,25.3,29.35,33.4,37.45,41.5,45.55,49.6,53.65,
+                   57.7,61.75,65.8,69.85,73.9,77.95,82.0],
+    },
+    "avg_glucose_level": {
+        "counts": [523,727,957,833,571,385,202,108,90,64,44,47,78,131,114,103,73,35,17,8],
+        "edges":  [55.12,65.95,76.78,87.61,98.44,109.28,120.11,130.94,141.77,152.60,163.43,
+                   174.26,185.09,195.92,206.75,217.59,228.42,239.25,250.08,260.91,271.74],
+    },
+    "age_percentiles": {"10": 11.0, "25": 25.0, "50": 45.0, "75": 61.0, "90": 75.0},
+}
 
 VARIABLES_NUMERICAS = ["age", "avg_glucose_level"]
 
@@ -97,6 +103,18 @@ OPCIONES_FUMADOR = {
     "Fumador anteriormente": "'formerly smoked'",
     "Desconocido / no reportado": "Unknown",
 }
+
+# ------------------------------------------------------------
+# Carga del modelo (único artefacto externo que necesita el repo)
+# ------------------------------------------------------------
+@st.cache_resource
+def cargar_modelo():
+    with open("modelo_rf_cardiaco.pkl", "rb") as f:
+        modelo, labelencoder, variables, min_max_scaler = pickle.load(f)
+    return modelo, labelencoder, list(variables), min_max_scaler
+
+
+modelo, labelencoder, variables, min_max_scaler = cargar_modelo()
 
 # ------------------------------------------------------------
 # Encabezado
@@ -156,6 +174,12 @@ def preparar_entrada(age, hypertension, heart_disease, ever_married, avg_glucose
     fila_final = fila_dummies.reindex(columns=variables, fill_value=0)
     fila_final[VARIABLES_NUMERICAS] = min_max_scaler.transform(fila_final[VARIABLES_NUMERICAS])
     return fila_final
+
+
+def percentil_aproximado(valor, percentiles: dict) -> int:
+    ps = [int(p) for p in percentiles.keys()]
+    xs = [float(v) for v in percentiles.values()]
+    return int(np.interp(valor, xs, ps))
 
 
 def gauge_riesgo(probabilidad_pct: float) -> go.Figure:
@@ -218,7 +242,7 @@ with tab_prediccion:
             st.plotly_chart(grafico_importancia(), use_container_width=True)
             st.caption("Importancia media de cada variable para el modelo Random Forest (calculada sobre todo el conjunto de datos).")
         with col_b:
-            st.plotly_chart(histograma_contexto(dist["age_percentiles"]["50"], dist["age"], "Distribución de edad en los datos", "#60a5fa"), use_container_width=True)
+            st.plotly_chart(histograma_contexto(DISTRIBUCIONES["age_percentiles"]["50"], DISTRIBUCIONES["age"], "Distribución de edad en los datos", "#60a5fa"), use_container_width=True)
     else:
         entrada = preparar_entrada(age, hypertension, heart_disease, ever_married,
                                     avg_glucose_level, OPCIONES_FUMADOR[smoking_label])
@@ -245,7 +269,8 @@ with tab_prediccion:
 
             st.markdown('<div class="card">', unsafe_allow_html=True)
             st.write("**Resumen del paciente**")
-            st.write(f"- Edad: **{age}** años (percentil ~{int(np.interp(age, list(dist['age_percentiles'].values()), [10,25,50,75,90])) if age else 0})")
+            percentil_edad = percentil_aproximado(age, DISTRIBUCIONES["age_percentiles"])
+            st.write(f"- Edad: **{age}** años (percentil ~{percentil_edad} respecto a la población de entrenamiento)")
             st.write(f"- Glucosa promedio: **{avg_glucose_level:.1f} mg/dL**")
             st.write(f"- Hipertensión: **{hypertension}** · Cardiopatía: **{heart_disease}**")
             st.write(f"- Estado civil (casado/a alguna vez): **{ever_married}** · Fumador: **{smoking_label}**")
@@ -261,9 +286,9 @@ with tab_prediccion:
         st.divider()
         colx, coly = st.columns(2)
         with colx:
-            st.plotly_chart(histograma_contexto(age, dist["age"], "Edad del paciente vs. población de entrenamiento", "#60a5fa"), use_container_width=True)
+            st.plotly_chart(histograma_contexto(age, DISTRIBUCIONES["age"], "Edad del paciente vs. población de entrenamiento", "#60a5fa"), use_container_width=True)
         with coly:
-            st.plotly_chart(histograma_contexto(avg_glucose_level, dist["avg_glucose_level"], "Glucosa del paciente vs. población de entrenamiento", "#f472b6"), use_container_width=True)
+            st.plotly_chart(histograma_contexto(avg_glucose_level, DISTRIBUCIONES["avg_glucose_level"], "Glucosa del paciente vs. población de entrenamiento", "#f472b6"), use_container_width=True)
 
         st.warning("⚠️ Este resultado es producto de un modelo estadístico entrenado con fines académicos. "
                     "No sustituye una valoración médica profesional.")
@@ -272,14 +297,14 @@ with tab_prediccion:
 # TAB 2 — Desempeño del modelo
 # ------------------------------------------------------------
 with tab_desempeno:
-    reporte = metricas["reporte"]
+    reporte = METRICAS["reporte"]
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Exactitud (accuracy)", f"{reporte['accuracy']*100:.1f}%")
     c2.metric("Recall — clase Yes", f"{reporte['Yes']['recall']*100:.1f}%")
     c3.metric("Precisión — clase Yes", f"{reporte['Yes']['precision']*100:.1f}%")
     c4.metric("F1 — clase Yes", f"{reporte['Yes']['f1-score']*100:.1f}%")
 
-    st.caption(f"Evaluado sobre el 30% de prueba · {metricas['n_estimators']} árboles · profundidad máxima {metricas['max_depth']}")
+    st.caption(f"Evaluado sobre el 30% de prueba · {METRICAS['n_estimators']} árboles · profundidad máxima {METRICAS['max_depth']}")
 
     df_reporte = pd.DataFrame(reporte).T.loc[["No", "Yes"], ["precision", "recall", "f1-score", "support"]]
     fig_bar = px.bar(df_reporte.reset_index().melt(id_vars="index", value_vars=["precision", "recall", "f1-score"]),
@@ -291,7 +316,7 @@ with tab_desempeno:
     st.plotly_chart(fig_bar, use_container_width=True)
 
     st.markdown(
-        f"El modelo se entrenó con balanceo sintético (SMOTE-NC) para la clase minoritaria "
-        f"y `class_weight='balanced_subsample'`, priorizando **recall** en la clase *Yes* "
-        f"(detectar el mayor número posible de casos de riesgo real), a costa de una menor precisión."
+        "El modelo se entrenó con balanceo sintético (SMOTE-NC) para la clase minoritaria "
+        "y `class_weight='balanced_subsample'`, priorizando **recall** en la clase *Yes* "
+        "(detectar el mayor número posible de casos de riesgo real), a costa de una menor precisión."
     )
